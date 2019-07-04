@@ -17,9 +17,12 @@ import random
 from dgl.contrib.data import load_data
 
 from layers import RGCNBlockLayer as RGCNLayer
+from layers import RGCNBlockLayer2 as RGCNLayer2
+
 from model import BaseRGCN
 
 import utils
+import os
 
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
@@ -30,7 +33,8 @@ class EmbeddingLayer(nn.Module):
         node_id = g.ndata['id'].squeeze()
         g.ndata['h'] = self.embedding(node_id)
 
-class RGCN(BaseRGCN):
+
+class RGCN0(BaseRGCN):
     def build_input_layer(self):
         return EmbeddingLayer(self.num_nodes, self.h_dim)
 
@@ -39,21 +43,45 @@ class RGCN(BaseRGCN):
         return RGCNLayer(self.h_dim, self.h_dim, self.num_rels, self.num_bases,
                          activation=act, self_loop=True, dropout=self.dropout)
 
+class RGCN1(BaseRGCN):
+    def build_input_layer(self):
+        return EmbeddingLayer(self.num_nodes, self.h_dim)
+
+    def build_hidden_layer(self, idx):
+        act = F.relu if idx < self.num_hidden_layers - 1 else None
+        self.rgcn_layer = RGCNLayer2(self.h_dim, self.h_dim, self.num_rels,
+                         activation=act, self_loop=True, dropout=self.dropout)
+        return self.rgcn_layer
+
+
 class LinkPredict(nn.Module):
-    def __init__(self, in_dim, h_dim, num_rels, num_bases=-1,
+    def __init__(self, in_dim, h_dim, num_rels, model_name, num_bases=-1,
                  num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0):
         super(LinkPredict, self).__init__()
-        self.rgcn = RGCN(in_dim, h_dim, h_dim, num_rels * 2, num_bases,
-                         num_hidden_layers, dropout, use_cuda)
-        self.reg_param = reg_param
-        self.w_relation = nn.Parameter(torch.Tensor(num_rels, h_dim))
-        nn.init.xavier_uniform_(self.w_relation,
-                                gain=nn.init.calculate_gain('relu'))
+        self.model_name = model_name
+        if(model_name == "RGCN"):
+            self.rgcn = RGCN0(in_dim, h_dim, h_dim, num_rels * 2, num_bases,
+                             num_hidden_layers, dropout, use_cuda)
+            self.w_relation = nn.Parameter(torch.Tensor(num_rels, h_dim))
+            nn.init.xavier_uniform_(self.w_relation, gain=nn.init.calculate_gain('relu'))
 
+        elif(model_name == "EGCN"):
+            self.rgcn = RGCN1(in_dim, h_dim, h_dim, num_rels * 2, num_bases,
+                             num_hidden_layers, dropout, use_cuda)
+            self.w_relation = self.rgcn.rgcn_layer.get_w()
+
+        self.reg_param = reg_param
+
+        # This is the relation embeddings. In RGCN all relation embeddings
+        # are separately learned.
+        
     def calc_score(self, embedding, triplets):
         # DistMult
         s = embedding[triplets[:,0]]
-        r = self.w_relation[triplets[:,1]]
+        if(self.model_name == "RGCN"):
+            r = self.w_relation[triplets[:,1]]
+        elif(self.model_name == "EGCN"):
+            r = self.rgcn.rgcn_layer.get_w()[triplets[:,1]]
         o = embedding[triplets[:,2]]
         score = torch.sum(s * r * o, dim=1)
         return score
@@ -64,9 +92,13 @@ class LinkPredict(nn.Module):
     def evaluate(self, g):
         # get embedding and relation weight without grad
         embedding = self.forward(g)
+        if(self.model_name == "EGCN"):
+            self.w_relation = self.rgcn.rgcn_layer.get_w()
         return embedding, self.w_relation
 
     def regularization_loss(self, embedding):
+        if(self.model_name == "EGCN"):
+            self.w_relation = self.rgcn.rgcn_layer.get_w()
         return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
 
     def get_loss(self, g, triplets, labels):
@@ -89,14 +121,18 @@ def main(args):
     num_rels = data.num_rels
 
     # check cuda
-    use_cuda = args.gpu >= 0 and torch.cuda.is_available()
-    if use_cuda:
-        torch.cuda.set_device(args.gpu)
+    # use_cuda = args.gpu >= 0 and torch.cuda.is_available()
+    # if use_cuda:
+    #     torch.cuda.set_device(args.gpu)
+
+    use_cuda = torch.cuda.is_available()
+    
 
     # create model
     model = LinkPredict(num_nodes,
                         args.n_hidden,
                         num_rels,
+                        args.model,
                         num_bases=args.n_bases,
                         num_hidden_layers=args.n_layers,
                         dropout=args.dropout,
@@ -127,7 +163,7 @@ def main(args):
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    model_state_file = 'model_state.pth'
+    model_state_file = 'model_state_' + str(args.dropout) + '_' + str(args.lr) + '_' + str(args.regularization) + '.pth'
     forward_time = []
     backward_time = []
 
@@ -170,8 +206,9 @@ def main(args):
 
         forward_time.append(t1 - t0)
         backward_time.append(t2 - t1)
-        print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
-              format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
+        if epoch % 100 == 0:
+            print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
+                  format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
 
         optimizer.zero_grad()
 
@@ -190,8 +227,13 @@ def main(args):
                     break
             else:
                 best_mrr = mrr
+
+                try:
+                    os.makedirs(args.model)
+                except FileExistsError:
+                    pass
                 torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
-                           model_state_file)
+                           args.model + "/" + model_state_file)
             if use_cuda:
                 model.cuda()
 
@@ -201,7 +243,7 @@ def main(args):
 
     print("\nstart testing:")
     # use best model checkpoint
-    checkpoint = torch.load(model_state_file)
+    checkpoint = torch.load(args.model + "/" + model_state_file)
     if use_cuda:
         model.cpu() # test on CPU
     model.eval()
@@ -243,7 +285,9 @@ if __name__ == '__main__':
             help="number of negative samples per positive sample")
     parser.add_argument("--evaluate-every", type=int, default=500,
             help="perform evaluation every n epochs")
-
+    parser.add_argument("--rgcn")
+    parser.add_argument("--model", type=str,
+            help="which model do you want to train on?")
     args = parser.parse_args()
     print(args)
     main(args)

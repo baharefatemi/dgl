@@ -127,11 +127,10 @@ class RGCNBlockLayer(RGCNLayer):
 
     def propagate(self, g):
         g.update_all(self.msg_func, fn.sum(msg='msg', out='h'), self.apply_func)
-        # This is the function that do the job in updating everythin
-        # msg_function send the message over all edges 
-        # second function update the node embedding based on the message they received
+
     def apply_func(self, nodes):
         return {'h': nodes.data['h'] * nodes.data['norm']}
+
 
 class RGCNBlockLayer2(RGCNLayer):
     def __init__(self, in_feat, out_feat, num_rels, bias=None,
@@ -142,20 +141,27 @@ class RGCNBlockLayer2(RGCNLayer):
         self.num_rels = num_rels
         self.out_feat = out_feat
         
-        self.submat_in = in_feat // self.num_bases
-        self.submat_out = out_feat // self.num_bases
-
         # assuming in_feat and out_feat are both divisible by num_bases
-        self.weight = nn.Parameter(torch.Tensor(
-            self.num_rels, self.num_bases * self.submat_in * self.submat_out))
+        self.weight = nn.Parameter(torch.Tensor(self.num_rels, self.out_feat))
         nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
 
+
+        self.W1 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W2 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W3 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W4 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W5 = nn.Linear(out_feat, out_feat, bias=True)
+
     def msg_func(self, edges):
-        weight = self.weight.index_select(0, edges.data['type']).view(
-                    -1, self.submat_in, self.submat_out)
-        node = edges.src['h'].view(-1, 1, self.submat_in)
-        msg = torch.bmm(node, weight).view(-1, self.out_feat)
-        print(msg)
+        weight = self.weight.index_select(0, edges.data['type'])
+        # .view(-1, self.out_feat)
+        node0 = edges.src['h']
+        node1 = edges.dst['h']
+        # .view(-1, 1, self.submat_in)
+
+        # this is the inner product part
+        msg = torch.sigmoid(self.W1(node0) + torch.sigmoid(self.W2(weight)) * self.W3(node1))
+        # msg = torch.bmm(node, weight).view(-1, self.out_feat)
         return {'msg': msg}
 
     def propagate(self, g):
@@ -163,6 +169,9 @@ class RGCNBlockLayer2(RGCNLayer):
         # This is the function that do the job in updating everythin
         # msg_function send the message over all edges 
         # second function update the node embedding based on the message they received
+
     def apply_func(self, nodes):
         return {'h': nodes.data['h'] * nodes.data['norm']}
 
+    def get_w(self):
+        return self.weight
