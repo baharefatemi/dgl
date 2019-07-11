@@ -163,12 +163,9 @@ def sort_and_rank(score, target):
     indices = indices[:, 1].view(-1)
     return indices
 
-def perturb_and_get_rank(embedding, w, a, r, b, num_entity, batch_size=100):
+def perturb_and_get_rank(embedding, w, a, r, b, num_entity, batch_size):
     """ Perturb one element in the triplets
     """
-
-    # embedding stores node embedding
-    # w stores relation embedding
     n_batch = (num_entity + batch_size - 1) // batch_size
     ranks = []
     for idx in range(n_batch):
@@ -181,16 +178,20 @@ def perturb_and_get_rank(embedding, w, a, r, b, num_entity, batch_size=100):
         emb_ar = emb_ar.transpose(0, 1).unsqueeze(2) # size: D x E x 1
         emb_c = embedding.transpose(0, 1).unsqueeze(1) # size: D x 1 x V
         # out-prod and reduce sum
+        
+        emb_ar = emb_ar.cuda()
+        emb_c = emb_c.cuda()
+
         out_prod = torch.bmm(emb_ar, emb_c) # size D x E x V
         score = torch.sum(out_prod, dim=0) # size E x V
-        score = torch.sigmoid(score)
+        score = torch.sigmoid(score).cpu()
         target = b[batch_start: batch_end]
         ranks.append(sort_and_rank(score, target))
     return torch.cat(ranks)
 
 # TODO (lingfan): implement filtered metrics
 # return MRR (raw), and Hits @ (1, 3, 10)
-def evaluate(test_graph, model, test_triplets, num_entity, hits=[], eval_bz=100):
+def evaluate(test_graph, model, test_triplets, num_entity, hits=[], eval_bz=10):
     with torch.no_grad():
         embedding, w = model.evaluate(test_graph)
         s = test_triplets[:, 0]
@@ -213,50 +214,103 @@ def evaluate(test_graph, model, test_triplets, num_entity, hits=[], eval_bz=100)
             print("Hits (raw) @ {}: {:.6f}".format(hit, avg_count.item()))
     return mrr.item()
 
-# def perturb_and_get_rank_filtered(embedding, w, a, r, b, num_entity):
+
+# def perturb_and_get_rank_filtered(embedding, w, s, r, o, num_entity, all_data):
 #     """ Perturb one element in the triplets
 #     """
 
 #     # embedding stores node embedding
 #     # w stores relation embedding
 
-#     ranks = []
-#     for idx in range(n_batch):
-#         print("batch {} / {}".format(idx, n_batch))
-#         batch_start = idx * batch_size
-#         batch_end = min(num_entity, (idx + 1) * batch_size)
-#         batch_a = a[batch_start: batch_end]
-#         batch_r = r[batch_start: batch_end]
-#         emb_ar = embedding[batch_a] * w[batch_r]
+
+#     casted_all_data = cast_all_data(all_data)
+
+#     rank_s = 0
+#     rank_o = 0
+#     for head_or_tail in ["head", "tail"]:
+#         queries = create_queries([s, r, o], head_or_tail, num_entity)
+#         # print(tuple([s, r, o]))
+#         # print(queries)
+#         # print(set(queries))
+#         # all_data = all_data.astype(set)
+#         # print(all_data)
+#         # print(set(queries))
+#         # a = list(set(queries) - all_data)
+#         # queries = [tuple([s, r, o])] + a
+        
+#         # print(set(queries))
+
+#         queries = list(set(queries) - casted_all_data)
+
+#         if(head_or_tail == "head"):
+#             a = o
+#             b = queries[:, 0]
+#         else:
+#             a = s
+#             b = queries[:, 2]
+
+#         emb_ar = embedding[a] * w[r]
 #         emb_ar = emb_ar.transpose(0, 1).unsqueeze(2) # size: D x E x 1
-#         emb_c = embedding.transpose(0, 1).unsqueeze(1) # size: D x 1 x V
+#         emb_c = embedding[b].transpose(0, 1).unsqueeze(1) # size: D x 1 x V
+
 #         # out-prod and reduce sum
 #         out_prod = torch.bmm(emb_ar, emb_c) # size D x E x V
 #         score = torch.sum(out_prod, dim=0) # size E x V
 #         score = torch.sigmoid(score)
-#         target = b[batch_start: batch_end]
-#         ranks.append(sort_and_rank(score, target))
-#     return torch.cat(ranks)
+#         target = b[0]
+#         rank = sort_and_rank(score, target)
+#         if(head_or_tail == "head"):
+#             rank_s = rank
+#         else:
+#             rank_o = rank
 
-# def evaluate_filtered(test_graph, model, test_triplets, num_entity, hits=[], eval_bz=1):
+#     return rank_s, rank_o
+
+# def create_queries(fact, head_or_tail, num_entity):
+#     head, rel, tail = fact
+#     if head_or_tail == "head":
+#         return [(torch.tensor(i), rel, tail) for i in range(num_entity)]
+#     elif head_or_tail == "tail":
+#         return [(head, rel, torch.tensor(i)) for i in range(num_entity)]
+
+
+# return MRR (filtered), and Hits @ (1, 3, 10)
+# def evaluate_filtered(test_graph, model, test_triplets, num_entity, all_data, hits=[]):
+#     ranks = []
 #     with torch.no_grad():
 #         embedding, w = model.evaluate(test_graph)
-#         s = test_triplets[:, 0]
-#         r = test_triplets[:, 1]
-#         o = test_triplets[:, 2]
+#         for i in range(len(test_triplets)):
+#             s = test_triplets[i, 0]
+#             r = test_triplets[i, 1]
+#             o = test_triplets[i, 2]
 
-#         # perturb subject
-#         ranks_s = perturb_and_get_rank_filtered(embedding, w, o, r, s, num_entity)
-#         # perturb object
-#         ranks_o = perturb_and_get_rank_filtered(embedding, w, s, r, o, num_entity)
+#             # perturb subject and object
+#             rank_s, rank_o = perturb_and_get_rank_filtered(embedding, w, o, r, s, num_entity, all_data)
 
-#         ranks = torch.cat([ranks_s, ranks_o])
-#         ranks += 1 # change to 1-indexed
-
+#             ranks.append(rank_s)
+#             ranks.append(rank_o)
+#         # ranks += 1 # change to 1-indexed
+#         ranks = torch.tensor(ranks)
 #         mrr = torch.mean(1.0 / ranks.float())
-#         print("MRR (raw): {:.6f}".format(mrr.item()))
+#         print("MRR (filtered): {:.6f}".format(mrr.item()))
 
 #         for hit in hits:
 #             avg_count = torch.mean((ranks <= hit).float())
-#             print("Hits (raw) @ {}: {:.6f}".format(hit, avg_count.item()))
+#             print("Hits (filtered) @ {}: {:.6f}".format(hit, avg_count.item()))
 #     return mrr.item()
+
+# def cast_all_data(all_data):
+#     casted_data = set()
+#     for i in all_data:
+#         s = torch.tensor(i[0])
+#         r = torch.tensor(i[1])
+#         o = torch.tensor(i[2])
+#         # use_cuda = torch.cuda.is_available()
+#         # if(use_cuda):
+#         #     s = s.cuda()
+#         #     r = r.cuda()
+#         #     o = o.cuda()
+#         triple = tuple([s, r, o])
+#         casted_data.add(triple)
+#     return casted_data
+

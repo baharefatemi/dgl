@@ -23,11 +23,17 @@ from model import BaseRGCN
 
 import utils
 import os
+import warnings 
+
+
+from shuriken.callbacks import ShurikenMonitor
+from shuriken.utils import get_hparams
 
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
         super(EmbeddingLayer, self).__init__()
         self.embedding = torch.nn.Embedding(num_nodes, h_dim)
+        # .cuda()
 
     def forward(self, g):
         node_id = g.ndata['id'].squeeze()
@@ -119,11 +125,13 @@ def main(args):
     valid_data = data.valid
     test_data = data.test
     num_rels = data.num_rels
-
+    all_data = np.concatenate((train_data, valid_data, test_data), axis=0)
     # check cuda
     # use_cuda = args.gpu >= 0 and torch.cuda.is_available()
     # if use_cuda:
     #     torch.cuda.set_device(args.gpu)
+
+    monitor = ShurikenMonitor()
 
     use_cuda = torch.cuda.is_available()
     
@@ -142,6 +150,9 @@ def main(args):
     # validation and testing triplets
     valid_data = torch.LongTensor(valid_data)
     test_data = torch.LongTensor(test_data)
+    # all_data = torch.LongTensor(all_data.astype(set))
+
+
 
     # build test graph
     test_graph, test_rel, test_norm = utils.build_test_graph(
@@ -206,9 +217,9 @@ def main(args):
 
         forward_time.append(t1 - t0)
         backward_time.append(t2 - t1)
-        if epoch % 100 == 0:
-            print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
-                  format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
+
+        print("Epoch {:04d} | Loss {:.4f} | Best MRR {:.4f} | Forward {:.4f}s | Backward {:.4f}s".
+              format(epoch, loss.item(), best_mrr, forward_time[-1], backward_time[-1]))
 
         optimizer.zero_grad()
 
@@ -219,8 +230,12 @@ def main(args):
                 model.cpu()
             model.eval()
             print("start eval")
+            # mrr_f = utils.evaluate_filtered(test_graph, model, valid_data, num_nodes, all_data, hits=[1, 3, 10])
             mrr = utils.evaluate(test_graph, model, valid_data, num_nodes,
                                  hits=[1, 3, 10], eval_bz=args.eval_batch_size)
+            
+            monitor.send_info(epoch, {"mrr": mrr})            
+
             # save best model
             if mrr < best_mrr:
                 if epoch >= args.n_epochs:
@@ -233,7 +248,7 @@ def main(args):
                 except FileExistsError:
                     pass
                 torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
-                           args.model + "/" + model_state_file)
+                        args.model + "/" + model_state_file)
             if use_cuda:
                 model.cuda()
 
@@ -254,6 +269,8 @@ def main(args):
 
 
 if __name__ == '__main__':
+
+
     parser = argparse.ArgumentParser(description='RGCN')
     parser.add_argument("--dropout", type=float, default=0.2,
             help="dropout probability")
@@ -271,7 +288,7 @@ if __name__ == '__main__':
             help="number of minimum training epochs")
     parser.add_argument("-d", "--dataset", type=str, required=True,
             help="dataset to use")
-    parser.add_argument("--eval-batch-size", type=int, default=500,
+    parser.add_argument("--eval-batch-size", type=int, default=100,
             help="batch size when evaluating")
     parser.add_argument("--regularization", type=float, default=0.01,
             help="regularization weight")
@@ -289,6 +306,16 @@ if __name__ == '__main__':
     parser.add_argument("--model", type=str,
             help="which model do you want to train on?")
     args = parser.parse_args()
-    print(args)
+    
+
+    d_params = vars(args)
+
+    # get the hyperparameters from the services
+    # returns a dict of hyperparams
+    hparams = get_hparams()
+    if 'n_iterations' in hparams:
+        hparams['number_of_steps'] = hparams['n_iterations'] * 100
+    d_params.update(hparams)
+
     main(args)
 

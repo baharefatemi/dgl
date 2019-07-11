@@ -151,6 +151,8 @@ class RGCNBlockLayer2(RGCNLayer):
         self.W3 = nn.Linear(out_feat, out_feat, bias=True)
         self.W4 = nn.Linear(out_feat, out_feat, bias=True)
         self.W5 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W6 = nn.Linear(out_feat, out_feat, bias=True)
+
 
     def msg_func(self, edges):
         weight = self.weight.index_select(0, edges.data['type'])
@@ -162,6 +164,11 @@ class RGCNBlockLayer2(RGCNLayer):
         # this is the inner product part
         msg = torch.sigmoid(self.W1(node0) + torch.sigmoid(self.W2(weight)) * self.W3(node1))
         # msg = torch.bmm(node, weight).view(-1, self.out_feat)
+
+        weight = torch.sigmoid(self.W4(weight) + self.W5(node0) + self.W6(node1)) + weight
+        # weight = weight.cuda()
+        self.weight = torch.nn.Parameter(weight)
+
         return {'msg': msg}
 
     def propagate(self, g):
