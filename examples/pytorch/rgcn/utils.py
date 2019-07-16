@@ -169,7 +169,7 @@ def perturb_and_get_rank(embedding, w, a, r, b, num_entity, batch_size):
     n_batch = (num_entity + batch_size - 1) // batch_size
     ranks = []
     for idx in range(n_batch):
-        print("batch {} / {}".format(idx, n_batch))
+        # print("batch {} / {}".format(idx, n_batch))
         batch_start = idx * batch_size
         batch_end = min(num_entity, (idx + 1) * batch_size)
         batch_a = a[batch_start: batch_end]

@@ -38,6 +38,7 @@ class RGCNLayer(nn.Module):
 
         self.propagate(g)
 
+
         # apply bias and activation
         node_repr = g.ndata['h']
         if self.bias:
@@ -46,6 +47,63 @@ class RGCNLayer(nn.Module):
             node_repr = node_repr + loop_message
         if self.activation:
             node_repr = self.activation(node_repr)
+
+        g.ndata['h'] = node_repr
+
+
+class RGCNLayer2(nn.Module):
+    def __init__(self, in_feat, out_feat, bias=None, activation=None,
+                 self_loop=False, dropout=0.0, skip_connection=False):
+        super(RGCNLayer2, self).__init__()
+        self.bias = bias
+        self.activation = activation
+        self.self_loop = self_loop
+        self.skip_connection = skip_connection
+
+        if self.bias == True:
+            self.bias = nn.Parameter(torch.Tensor(out_feat))
+            nn.init.xavier_uniform_(self.bias,
+                                    gain=nn.init.calculate_gain('relu'))
+
+        # weight for self loop
+        if self.self_loop:
+            self.loop_weight = nn.Parameter(torch.Tensor(in_feat, out_feat))
+            nn.init.xavier_uniform_(self.loop_weight,
+                                    gain=nn.init.calculate_gain('relu'))
+
+        if dropout:
+            self.dropout = nn.Dropout(dropout)
+        else:
+            self.dropout = None
+
+    # define how propagation is done in subclass
+    def propagate(self, g):
+        raise NotImplementedError
+
+    def forward(self, g):
+        if self.self_loop:
+            loop_message = torch.mm(g.ndata['h'], self.loop_weight)
+            if self.dropout is not None:
+                loop_message = self.dropout(loop_message)
+
+        # store previous value
+        if self.skip_connection:
+            prev_h = g.ndata['h']
+
+        # In the propagate function the data in 'h' will be updated.
+        self.propagate(g)
+
+
+        # apply bias and activation
+        node_repr = g.ndata['h']
+        if self.bias:
+            node_repr = node_repr + self.bias
+        if self.self_loop:
+            node_repr = node_repr + loop_message
+        if self.activation:
+            node_repr = self.activation(node_repr)
+        if self.skip_connection:
+            node_repr = node_repr + prev_h
 
         g.ndata['h'] = node_repr
 
@@ -118,6 +176,7 @@ class RGCNBlockLayer(RGCNLayer):
             self.num_rels, self.num_bases * self.submat_in * self.submat_out))
         nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
 
+
     def msg_func(self, edges):
         weight = self.weight.index_select(0, edges.data['type']).view(
                     -1, self.submat_in, self.submat_out)
@@ -132,7 +191,7 @@ class RGCNBlockLayer(RGCNLayer):
         return {'h': nodes.data['h'] * nodes.data['norm']}
 
 
-class RGCNBlockLayer2(RGCNLayer):
+class RGCNBlockLayer2(RGCNLayer2):
     def __init__(self, in_feat, out_feat, num_rels, bias=None,
                  activation=None, self_loop=False, dropout=0.0):
         super(RGCNBlockLayer2, self).__init__(in_feat, out_feat, bias,
@@ -146,28 +205,33 @@ class RGCNBlockLayer2(RGCNLayer):
         nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
 
 
-        self.W1 = nn.Linear(out_feat, out_feat, bias=True)
+        # self.W1 = nn.Linear(out_feat, out_feat, bias=True)
         self.W2 = nn.Linear(out_feat, out_feat, bias=True)
         self.W3 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W4 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W5 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W6 = nn.Linear(out_feat, out_feat, bias=True)
-
+        # self.W4 = nn.Linear(out_feat, out_feat, bias=True)
+        # self.W5 = nn.Linear(out_feat, out_feat, bias=True)
+        # self.W6 = nn.Linear(out_feat, out_feat, bias=True)
 
     def msg_func(self, edges):
         weight = self.weight.index_select(0, edges.data['type'])
         # .view(-1, self.out_feat)
-        node0 = edges.src['h']
-        node1 = edges.dst['h']
+        node = edges.src['h']
+        # node1 = edges.dst['h']
+
+        # weight = torch.sigmoid(self.W4(weight) + self.W5(node0) + self.W6(node1)) + weight
+
         # .view(-1, 1, self.submat_in)
 
         # this is the inner product part
-        msg = torch.sigmoid(self.W1(node0) + torch.sigmoid(self.W2(weight)) * self.W3(node1))
+        # msg = torch.sigmoid(self.W1(node0) + torch.sigmoid(self.W2(weight)) * self.W3(node1))
         # msg = torch.bmm(node, weight).view(-1, self.out_feat)
 
-        weight = torch.sigmoid(self.W4(weight) + self.W5(node0) + self.W6(node1)) + weight
-        # weight = weight.cuda()
-        self.weight = torch.nn.Parameter(weight)
+        msg = torch.sigmoid(self.W2(weight)) * self.W3(node)
+
+        # weight = torch.sigmoid(self.W4(weight) + self.W5(node0) + self.W6(node1)) + weight
+        # # weight = weight.cuda()
+        # self.weight = torch.nn.Parameter(weight)
+
 
         return {'msg': msg}
 

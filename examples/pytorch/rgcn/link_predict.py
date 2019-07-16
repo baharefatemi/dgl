@@ -134,7 +134,8 @@ def main(args):
     monitor = ShurikenMonitor()
 
     use_cuda = torch.cuda.is_available()
-    
+
+
 
     # create model
     model = LinkPredict(num_nodes,
@@ -147,10 +148,13 @@ def main(args):
                         use_cuda=use_cuda,
                         reg_param=args.regularization)
 
+
+
     # validation and testing triplets
     valid_data = torch.LongTensor(valid_data)
     test_data = torch.LongTensor(test_data)
     # all_data = torch.LongTensor(all_data.astype(set))
+
 
 
 
@@ -168,6 +172,9 @@ def main(args):
     if use_cuda:
         model.cuda()
 
+    # print("1")
+    # print(torch.cuda.memory_allocated(device=None))
+
     # build adj list and calculate degrees for sampling
     adj_list, degrees = utils.get_adj_and_degrees(num_nodes, train_data)
 
@@ -183,6 +190,7 @@ def main(args):
 
     epoch = 0
     best_mrr = 0
+
     while True:
         model.train()
         epoch += 1
@@ -223,6 +231,9 @@ def main(args):
 
         optimizer.zero_grad()
 
+        # print("2")
+        # print(torch.cuda.memory_allocated(device=None))
+
         # validation
         if epoch % args.evaluate_every == 0:
             # perform validation on CPU because full graph is too large
@@ -252,6 +263,8 @@ def main(args):
             if use_cuda:
                 model.cuda()
 
+
+
     print("training done")
     print("Mean forward time: {:4f}s".format(np.mean(forward_time)))
     print("Mean Backward time: {:4f}s".format(np.mean(backward_time)))
@@ -264,9 +277,9 @@ def main(args):
     model.eval()
     model.load_state_dict(checkpoint['state_dict'])
     print("Using best epoch: {}".format(checkpoint['epoch']))
-    utils.evaluate(test_graph, model, test_data, num_nodes, hits=[1, 3, 10],
+    test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, hits=[1, 3, 10],
                    eval_bz=args.eval_batch_size)
-
+    monitor.send_info({"test mrr": test_mrr})  
 
 if __name__ == '__main__':
 
@@ -307,6 +320,7 @@ if __name__ == '__main__':
             help="which model do you want to train on?")
     args = parser.parse_args()
     
+
 
     d_params = vars(args)
 
