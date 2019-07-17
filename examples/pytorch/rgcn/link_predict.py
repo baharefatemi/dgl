@@ -26,8 +26,8 @@ import os
 import warnings 
 
 
-from shuriken.callbacks import ShurikenMonitor
-from shuriken.utils import get_hparams
+# from shuriken.callbacks import ShurikenMonitor
+# from shuriken.utils import get_hparams
 
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
@@ -56,7 +56,7 @@ class RGCN1(BaseRGCN):
     def build_hidden_layer(self, idx):
         act = F.relu if idx < self.num_hidden_layers - 1 else None
         self.rgcn_layer = RGCNLayer2(self.h_dim, self.h_dim, self.num_rels,
-                         activation=act, self_loop=True, dropout=self.dropout)
+                         activation=act, self_loop=True, dropout=self.dropout, skip_connection=True)
         return self.rgcn_layer
 
 
@@ -131,7 +131,7 @@ def main(args):
     # if use_cuda:
     #     torch.cuda.set_device(args.gpu)
 
-    monitor = ShurikenMonitor()
+    # monitor = ShurikenMonitor()
 
     use_cuda = torch.cuda.is_available()
 
@@ -245,7 +245,7 @@ def main(args):
             mrr = utils.evaluate(test_graph, model, valid_data, num_nodes,
                                  hits=[1, 3, 10], eval_bz=args.eval_batch_size)
             
-            monitor.send_info(epoch, {"mrr": mrr})            
+            # monitor.send_info(epoch, {"mrr": mrr})            
 
             # save best model
             if mrr < best_mrr:
@@ -322,14 +322,14 @@ if __name__ == '__main__':
     
 
 
-    d_params = vars(args)
+    # d_params = vars(args)
 
-    # get the hyperparameters from the services
-    # returns a dict of hyperparams
-    hparams = get_hparams()
-    if 'n_iterations' in hparams:
-        hparams['number_of_steps'] = hparams['n_iterations'] * 100
-    d_params.update(hparams)
+    # # get the hyperparameters from the services
+    # # returns a dict of hyperparams
+    # hparams = get_hparams()
+    # if 'n_iterations' in hparams:
+    #     hparams['number_of_steps'] = hparams['n_iterations'] * 100
+    # d_params.update(hparams)
 
     main(args)
 

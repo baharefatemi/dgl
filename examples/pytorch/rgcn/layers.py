@@ -193,10 +193,10 @@ class RGCNBlockLayer(RGCNLayer):
 
 class RGCNBlockLayer2(RGCNLayer2):
     def __init__(self, in_feat, out_feat, num_rels, bias=None,
-                 activation=None, self_loop=False, dropout=0.0):
+                 activation=None, self_loop=False, dropout=0.0, skip_connection=False):
         super(RGCNBlockLayer2, self).__init__(in_feat, out_feat, bias,
                                              activation, self_loop=self_loop,
-                                             dropout=dropout)
+                                             dropout=dropout, skip_connection=skip_connection)
         self.num_rels = num_rels
         self.out_feat = out_feat
         
@@ -208,15 +208,15 @@ class RGCNBlockLayer2(RGCNLayer2):
         # self.W1 = nn.Linear(out_feat, out_feat, bias=True)
         self.W2 = nn.Linear(out_feat, out_feat, bias=True)
         self.W3 = nn.Linear(out_feat, out_feat, bias=True)
-        # self.W4 = nn.Linear(out_feat, out_feat, bias=True)
-        # self.W5 = nn.Linear(out_feat, out_feat, bias=True)
-        # self.W6 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W4 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W5 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W6 = nn.Linear(out_feat, out_feat, bias=True)
 
     def msg_func(self, edges):
         weight = self.weight.index_select(0, edges.data['type'])
         # .view(-1, self.out_feat)
         node = edges.src['h']
-        # node1 = edges.dst['h']
+        node1 = edges.dst['h']
 
         # weight = torch.sigmoid(self.W4(weight) + self.W5(node0) + self.W6(node1)) + weight
 
@@ -232,6 +232,7 @@ class RGCNBlockLayer2(RGCNLayer2):
         # # weight = weight.cuda()
         # self.weight = torch.nn.Parameter(weight)
 
+        self.weight[edges.data['type']] =  self.weight[edges.data['type']] + torch.sigmoid(self.W4(self.weight[edges.data['type']].data) + self.W5(node) + self.W6(node1))
 
         return {'msg': msg}
 
