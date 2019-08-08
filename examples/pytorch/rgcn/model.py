@@ -2,7 +2,7 @@ import torch.nn as nn
 
 class BaseRGCN(nn.Module):
     def __init__(self, num_nodes, h_dim, out_dim, num_rels, num_bases=-1,
-                 num_hidden_layers=1, dropout=0, use_cuda=False):
+                 num_hidden_layers=1, dropout=0, use_cuda=False, skip_connection=False):
         super(BaseRGCN, self).__init__()
         self.num_nodes = num_nodes
         self.h_dim = h_dim
@@ -12,7 +12,7 @@ class BaseRGCN(nn.Module):
         self.num_hidden_layers = num_hidden_layers
         self.dropout = dropout
         self.use_cuda = use_cuda
-
+        self.skip_connection = skip_connection
         # create rgcn layers
         self.build_model()
 
@@ -47,10 +47,10 @@ class BaseRGCN(nn.Module):
     def build_output_layer(self):
         return None
 
-    def forward(self, g):
+    def forward(self, g, weight, incidence_in, incidence_out):
         if self.features is not None:
             g.ndata['id'] = self.features
         for layer in self.layers:
-            layer(g)
-        return g.ndata.pop('h')
+            weight = layer(g, weight, incidence_in, incidence_out)
+        return g.ndata.pop('h'), weight
 

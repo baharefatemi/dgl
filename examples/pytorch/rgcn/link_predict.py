@@ -26,7 +26,7 @@ import os
 import warnings 
 
 
-from shuriken.callbacks import Shuriken
+from shuriken.callbacks import ShurikenMonitor
 from shuriken.utils import get_hparams
 
 class EmbeddingLayer(nn.Module):
@@ -35,9 +35,10 @@ class EmbeddingLayer(nn.Module):
         self.embedding = torch.nn.Embedding(num_nodes, h_dim)
         # .cuda()
 
-    def forward(self, g):
+    def forward(self, g, weight, incidence_in, incidence_out):
         node_id = g.ndata['id'].squeeze()
         g.ndata['h'] = self.embedding(node_id)
+        return weight
 
 
 class RGCN0(BaseRGCN):
@@ -56,13 +57,13 @@ class RGCN1(BaseRGCN):
     def build_hidden_layer(self, idx):
         act = F.relu if idx < self.num_hidden_layers - 1 else None
         self.rgcn_layer = RGCNLayer2(self.h_dim, self.h_dim, self.num_rels,
-                         activation=act, self_loop=True, dropout=self.dropout, skip_connection=True)
+                         activation=act, self_loop=True, dropout=self.dropout, skip_connection=self.skip_connection)
         return self.rgcn_layer
 
 
 class LinkPredict(nn.Module):
     def __init__(self, in_dim, h_dim, num_rels, model_name, num_bases=-1,
-                 num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0):
+                 num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0, skip_connection=False):
         super(LinkPredict, self).__init__()
         self.model_name = model_name
         if(model_name == "RGCN"):
@@ -73,48 +74,51 @@ class LinkPredict(nn.Module):
 
         elif(model_name == "EGCN"):
             self.rgcn = RGCN1(in_dim, h_dim, h_dim, num_rels * 2, num_bases,
-                             num_hidden_layers, dropout, use_cuda)
-            self.w_relation = self.rgcn.rgcn_layer.get_w()
+                             num_hidden_layers, dropout, use_cuda, skip_connection)
+            # self.w_relation = self.rgcn.rgcn_layer.get_w()
 
         self.reg_param = reg_param
 
         # This is the relation embeddings. In RGCN all relation embeddings
         # are separately learned.
         
-    def calc_score(self, embedding, triplets):
+    def calc_score(self, embedding, weight, triplets):
         # DistMult
         s = embedding[triplets[:,0]]
         if(self.model_name == "RGCN"):
             r = self.w_relation[triplets[:,1]]
         elif(self.model_name == "EGCN"):
-            r = self.rgcn.rgcn_layer.get_w()[triplets[:,1]]
+            r = weight[triplets[:,1]]
         o = embedding[triplets[:,2]]
         score = torch.sum(s * r * o, dim=1)
         return score
 
-    def forward(self, g):
-        return self.rgcn.forward(g)
+    def forward(self, g, weight, incidence_in, incidence_out):
+        return self.rgcn.forward(g, weight, incidence_in, incidence_out)
+
 
     def evaluate(self, g):
         # get embedding and relation weight without grad
-        embedding = self.forward(g)
-        if(self.model_name == "EGCN"):
-            self.w_relation = self.rgcn.rgcn_layer.get_w()
-        return embedding, self.w_relation
+        embedding, weight = self.forward(g)
+        # if(self.model_name == "EGCN"):
+        #     self.w_relation = self.rgcn.rgcn_layer.get_w()
+        return embedding, weight
 
-    def regularization_loss(self, embedding):
-        if(self.model_name == "EGCN"):
-            self.w_relation = self.rgcn.rgcn_layer.get_w()
-        return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
+    def regularization_loss(self, embedding, weight):
+        # if(self.model_name == "EGCN"):
+        #     self.w_relation = self.rgcn.rgcn_layer.get_w()
+        return torch.mean(embedding.pow(2)) + torch.mean(weight.pow(2))
 
-    def get_loss(self, g, triplets, labels):
+    def get_loss(self, g, triplets, labels, weight, incidence_in, incidence_out):
         # triplets is a list of data samples (positive and negative)
         # each row in the triplets is a 3-tuple of (source, relation, destination)
-        embedding = self.forward(g)
-        score = self.calc_score(embedding, triplets)
+        embedding, weight = self.forward(g, weight, incidence_in, incidence_out)
+
+        score = self.calc_score(embedding, weight, triplets)
+        score = score.clamp(min=-10, max=10)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
-        reg_loss = self.regularization_loss(embedding)
-        return predict_loss + self.reg_param * reg_loss
+        reg_loss = self.regularization_loss(embedding, weight)
+        return predict_loss + self.reg_param * reg_loss, weight
 
 
 def main(args):
@@ -146,7 +150,8 @@ def main(args):
                         num_hidden_layers=args.n_layers,
                         dropout=args.dropout,
                         use_cuda=use_cuda,
-                        reg_param=args.regularization)
+                        reg_param=args.regularization,
+                        skip_connection=args.skip_connection)
 
 
 
@@ -159,8 +164,7 @@ def main(args):
 
 
     # build test graph
-    test_graph, test_rel, test_norm = utils.build_test_graph(
-        num_nodes, num_rels, train_data)
+    test_graph, test_rel, test_norm, incidence_in, incidence_out = utils.build_test_graph(num_nodes, num_rels, train_data)
     test_deg = test_graph.in_degrees(
                 range(test_graph.number_of_nodes())).float().view(-1,1)
     test_node_id = torch.arange(0, num_nodes, dtype=torch.long).view(-1, 1)
@@ -191,12 +195,14 @@ def main(args):
     epoch = 0
     best_mrr = 0
 
+    weight = torch.rand(num_rels * 2, args.n_hidden).cuda()
+
     while True:
         model.train()
         epoch += 1
 
         # perform edge neighborhood sampling to generate training graph and data
-        g, node_id, edge_type, node_norm, data, labels = \
+        g, node_id, edge_type, node_norm, data, labels, incidence_in, incidence_out = \
             utils.generate_sampled_graph_and_labels(
                 train_data, args.graph_batch_size, args.graph_split_size,
                 num_rels, adj_list, degrees, args.negative_sample)
@@ -216,7 +222,8 @@ def main(args):
         g.edata['type'] = edge_type
 
         t0 = time.time()
-        loss = model.get_loss(g, data, labels)
+        loss, weight = model.get_loss(g, data, labels, weight, incidence_in, incidence_out)
+        weight = weight.detach()
         t1 = time.time()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm) # clip gradients
@@ -279,7 +286,7 @@ def main(args):
     print("Using best epoch: {}".format(checkpoint['epoch']))
     test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, hits=[1, 3, 10],
                    eval_bz=args.eval_batch_size)
-    monitor.send_info({"test mrr": test_mrr})  
+    monitor.send_info(epoch, {"test mrr": test_mrr})  
 
 if __name__ == '__main__':
 
@@ -318,6 +325,8 @@ if __name__ == '__main__':
     parser.add_argument("--rgcn")
     parser.add_argument("--model", type=str,
             help="which model do you want to train on?")
+    parser.add_argument("--skip-connection", type=bool, default=False,
+            help="skip connection in EGCN or not")
     args = parser.parse_args()
     
 

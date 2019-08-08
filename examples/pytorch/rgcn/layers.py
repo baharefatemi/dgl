@@ -30,13 +30,13 @@ class RGCNLayer(nn.Module):
     def propagate(self, g):
         raise NotImplementedError
 
-    def forward(self, g):
+    def forward(self, g, weight):
         if self.self_loop:
             loop_message = torch.mm(g.ndata['h'], self.loop_weight)
             if self.dropout is not None:
                 loop_message = self.dropout(loop_message)
 
-        self.propagate(g)
+        weight_ = self.propagate(g, weight)
 
 
         # apply bias and activation
@@ -50,6 +50,7 @@ class RGCNLayer(nn.Module):
 
         g.ndata['h'] = node_repr
 
+        return weight_
 
 class RGCNLayer2(nn.Module):
     def __init__(self, in_feat, out_feat, bias=None, activation=None,
@@ -77,10 +78,10 @@ class RGCNLayer2(nn.Module):
             self.dropout = None
 
     # define how propagation is done in subclass
-    def propagate(self, g):
+    def propagate(self, g, weight, incidence_in, incidence_out):
         raise NotImplementedError
 
-    def forward(self, g):
+    def forward(self, g, weight, incidence_in, incidence_out):
         if self.self_loop:
             loop_message = torch.mm(g.ndata['h'], self.loop_weight)
             if self.dropout is not None:
@@ -91,7 +92,7 @@ class RGCNLayer2(nn.Module):
             prev_h = g.ndata['h']
 
         # In the propagate function the data in 'h' will be updated.
-        self.propagate(g)
+        weight_ = self.propagate(g, weight, incidence_in, incidence_out)
 
 
         # apply bias and activation
@@ -106,6 +107,7 @@ class RGCNLayer2(nn.Module):
             node_repr = node_repr + prev_h
 
         g.ndata['h'] = node_repr
+        return weight_
 
 class RGCNBasisLayer(RGCNLayer):
     def __init__(self, in_feat, out_feat, num_rels, num_bases=-1, bias=None,
@@ -197,13 +199,14 @@ class RGCNBlockLayer2(RGCNLayer2):
         super(RGCNBlockLayer2, self).__init__(in_feat, out_feat, bias,
                                              activation, self_loop=self_loop,
                                              dropout=dropout, skip_connection=skip_connection)
+        self.skip_connection = skip_connection
         self.num_rels = num_rels
         self.out_feat = out_feat
         
         # assuming in_feat and out_feat are both divisible by num_bases
-        self.weight = nn.Parameter(torch.Tensor(self.num_rels, self.out_feat))
-        nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
-
+        # self.weight = torch.rand(self.num_rels, self.out_feat).cuda()
+        # nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
+        # self.weight.requires_grad = False
 
         # self.W1 = nn.Linear(out_feat, out_feat, bias=True)
         self.W2 = nn.Linear(out_feat, out_feat, bias=True)
@@ -213,18 +216,23 @@ class RGCNBlockLayer2(RGCNLayer2):
         self.W6 = nn.Linear(out_feat, out_feat, bias=True)
 
     def msg_func(self, edges):
+
         weight = self.weight.index_select(0, edges.data['type'])
         # .view(-1, self.out_feat)
+        
         node = edges.src['h']
         node1 = edges.dst['h']
 
-        # weight = torch.sigmoid(self.W4(weight) + self.W5(node0) + self.W6(node1)) + weight
+        # node = g.edges()[0]['h']
+        # node1 = g.edges()[1]['h']
 
-        # .view(-1, 1, self.submat_in)
-
+        # node = g.ndata['h'][g.edges()[0], :]
+        # node1 = g.ndata['h'][g.edges()[1], :]
         # this is the inner product part
         # msg = torch.sigmoid(self.W1(node0) + torch.sigmoid(self.W2(weight)) * self.W3(node1))
         # msg = torch.bmm(node, weight).view(-1, self.out_feat)
+        # print(self.weight)
+        # exit()
 
         msg = torch.sigmoid(self.W2(weight)) * self.W3(node)
 
@@ -232,18 +240,37 @@ class RGCNBlockLayer2(RGCNLayer2):
         # # weight = weight.cuda()
         # self.weight = torch.nn.Parameter(weight)
 
-        self.weight[edges.data['type']] =  self.weight[edges.data['type']] + torch.sigmoid(self.W4(self.weight[edges.data['type']].data) + self.W5(node) + self.W6(node1))
+        # with torch.no_grad():
+        #     if(self.skip_connection):
+        #         self.weight[edges.data['type']] =  self.weight[edges.data['type']] + torch.sigmoid(self.W4(self.weight[edges.data['type']].data) + self.W5(node) + self.W6(node1))
+        #     else:
+        #         self.weight[edges.data['type']] =  torch.sigmoid(self.W4(self.weight[edges.data['type']].data) + self.W5(node) + self.W6(node1))
 
         return {'msg': msg}
 
-    def propagate(self, g):
+    def propagate(self, g, weight, incidence_in, incidence_out):
+
+        n_0 = torch.sum(incidence_in.float(), dim = 1).view(-1, 1)
+        n_1 = torch.sum(incidence_out.float(), dim = 1).view(-1, 1)
+
+        n_0[n_0 == float(0)] = 0.000000001
+        n_1[n_1 == float(0)] = 0.000000001
+        
+        incidence_in = incidence_in / n_0
+        incidence_out = incidence_out / n_1
+
+        weight_ =  torch.relu(self.W4(weight) + self.W5(torch.mm(incidence_in, g.ndata['h'])) + self.W6(torch.mm(incidence_out, g.ndata['h'])))
+        # print(weight_)
+        # with torch.no_grad():
+
+        self.weight = weight_
         g.update_all(self.msg_func, fn.sum(msg='msg', out='h'), self.apply_func)
         # This is the function that do the job in updating everythin
         # msg_function send the message over all edges 
         # second function update the node embedding based on the message they received
+        return weight_
 
     def apply_func(self, nodes):
         return {'h': nodes.data['h'] * nodes.data['norm']}
 
-    def get_w(self):
-        return self.weight
+

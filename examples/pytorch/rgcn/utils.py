@@ -103,9 +103,9 @@ def generate_sampled_graph_and_labels(triplets, sample_size, split_size,
     # build DGL graph
     print("# sampled nodes: {}".format(len(uniq_v)))
     print("# sampled edges: {}".format(len(src) * 2))
-    g, rel, norm = build_graph_from_triplets(len(uniq_v), num_rels,
+    g, rel, norm, incidence_in, incidence_out = build_graph_from_triplets(len(uniq_v), num_rels,
                                              (src, rel, dst))
-    return g, uniq_v, rel, norm, samples, labels
+    return g, uniq_v, rel, norm, samples, labels, incidence_in, incidence_out
 
 def comp_deg_norm(g):
     in_deg = g.in_degrees(range(g.number_of_nodes())).float().numpy()
@@ -119,6 +119,7 @@ def build_graph_from_triplets(num_nodes, num_rels, triplets):
         This function also generates edge type and normalization factor
         (reciprocal of node incoming degree)
     """
+
     g = dgl.DGLGraph()
     g.add_nodes(num_nodes)
     src, rel, dst = triplets
@@ -129,7 +130,18 @@ def build_graph_from_triplets(num_nodes, num_rels, triplets):
     g.add_edges(src, dst)
     norm = comp_deg_norm(g)
     print("# nodes: {}, # edges: {}".format(num_nodes, len(src)))
-    return g, rel, norm
+
+    incidence_in = torch.zeros(num_rels * 2, num_nodes).cuda()
+    incidence_out = torch.zeros(num_rels * 2, num_nodes).cuda()
+
+    # print(edges)
+    for edge in edges:
+        incidence_in[edge[2], edge[0]] = 1
+
+    for edge in edges:
+        incidence_out[edge[2], edge[1]] = 1
+
+    return g, rel, norm, incidence_in, incidence_out
 
 def build_test_graph(num_nodes, num_rels, edges):
     src, rel, dst = edges.transpose()
