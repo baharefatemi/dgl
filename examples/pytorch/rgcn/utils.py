@@ -8,6 +8,7 @@ https://github.com/MichSchli/RelationPrediction
 import numpy as np
 import torch
 import dgl
+import math
 
 #######################################################################
 #
@@ -145,7 +146,6 @@ def build_graph_from_triplets(num_nodes, num_rels, triplets):
 
 def build_test_graph(num_nodes, num_rels, edges):
     src, rel, dst = edges.transpose()
-    print("Test graph:")
     return build_graph_from_triplets(num_nodes, num_rels, (src, rel, dst))
 
 def negative_sampling(pos_samples, num_entity, negative_rate):
@@ -171,14 +171,17 @@ def negative_sampling(pos_samples, num_entity, negative_rate):
 
 def sort_and_rank(score, target):
     _, indices = torch.sort(score, dim=1, descending=True)
+    # print(target)
     indices = torch.nonzero(indices == target.view(-1, 1))
     indices = indices[:, 1].view(-1)
     return indices
 
-def perturb_and_get_rank(embedding, w, a, r, b, num_entity, batch_size):
+def perturb_and_get_rank(embedding, w, a, r, b, num_entity, num_triples, batch_size):
     """ Perturb one element in the triplets
     """
-    n_batch = (num_entity + batch_size - 1) // batch_size
+    # n_batch = (num_entity + batch_size - 1) // batch_size
+    n_batch = math.floor(num_triples // batch_size)
+
     ranks = []
     for idx in range(n_batch):
         # print("batch {} / {}".format(idx, n_batch))
@@ -194,6 +197,8 @@ def perturb_and_get_rank(embedding, w, a, r, b, num_entity, batch_size):
         emb_ar = emb_ar.cuda()
         emb_c = emb_c.cuda()
 
+        # print(idx)
+
         out_prod = torch.bmm(emb_ar, emb_c) # size D x E x V
         score = torch.sum(out_prod, dim=0) # size E x V
         score = torch.sigmoid(score).cpu()
@@ -203,17 +208,20 @@ def perturb_and_get_rank(embedding, w, a, r, b, num_entity, batch_size):
 
 # TODO (lingfan): implement filtered metrics
 # return MRR (raw), and Hits @ (1, 3, 10)
-def evaluate(test_graph, model, test_triplets, num_entity, hits=[], eval_bz=10):
+def evaluate(test_graph, model, test_triplets, num_entity, weight, incidence_in_test, incidence_out_test, hits=[], eval_bz=10):
+
     with torch.no_grad():
-        embedding, w = model.evaluate(test_graph)
+        embedding, w = model.evaluate(test_graph, weight, incidence_in_test, incidence_out_test)
+
         s = test_triplets[:, 0]
         r = test_triplets[:, 1]
         o = test_triplets[:, 2]
 
         # perturb subject
-        ranks_s = perturb_and_get_rank(embedding, w, o, r, s, num_entity, eval_bz)
+        ranks_s = perturb_and_get_rank(embedding, w, o, r, s, num_entity, len(test_triplets), eval_bz)
+
         # perturb object
-        ranks_o = perturb_and_get_rank(embedding, w, s, r, o, num_entity, eval_bz)
+        ranks_o = perturb_and_get_rank(embedding, w, s, r, o, num_entity, len(test_triplets), eval_bz)
 
         ranks = torch.cat([ranks_s, ranks_o])
         ranks += 1 # change to 1-indexed

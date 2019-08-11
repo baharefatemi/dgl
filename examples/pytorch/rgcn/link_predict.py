@@ -26,8 +26,11 @@ import os
 import warnings 
 
 
-from shuriken.callbacks import ShurikenMonitor
-from shuriken.utils import get_hparams
+use_shuriken = True
+
+if(use_shuriken):
+    from shuriken.callbacks import ShurikenMonitor
+    from shuriken.utils import get_hparams
 
 class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
@@ -56,9 +59,9 @@ class RGCN1(BaseRGCN):
 
     def build_hidden_layer(self, idx):
         act = F.relu if idx < self.num_hidden_layers - 1 else None
-        self.rgcn_layer = RGCNLayer2(self.h_dim, self.h_dim, self.num_rels,
-                         activation=act, self_loop=True, dropout=self.dropout, skip_connection=self.skip_connection)
-        return self.rgcn_layer
+        print(act)
+        return RGCNLayer2(self.h_dim, self.h_dim, self.num_rels,
+                         activation=act, self_loop=True, dropout=self.dropout)
 
 
 class LinkPredict(nn.Module):
@@ -79,11 +82,9 @@ class LinkPredict(nn.Module):
 
         self.reg_param = reg_param
 
-        # This is the relation embeddings. In RGCN all relation embeddings
-        # are separately learned.
         
     def calc_score(self, embedding, weight, triplets):
-        # DistMult
+
         s = embedding[triplets[:,0]]
         if(self.model_name == "RGCN"):
             r = self.w_relation[triplets[:,1]]
@@ -97,25 +98,26 @@ class LinkPredict(nn.Module):
         return self.rgcn.forward(g, weight, incidence_in, incidence_out)
 
 
-    def evaluate(self, g):
+    def evaluate(self, g, weight, incidence_in, incidence_out):
         # get embedding and relation weight without grad
-        embedding, weight = self.forward(g)
-        # if(self.model_name == "EGCN"):
-        #     self.w_relation = self.rgcn.rgcn_layer.get_w()
-        return embedding, weight
+        embedding, weight = self.forward(g, weight.cpu(), incidence_in.cpu(), incidence_out.cpu())
+
+        if(self.model_name == "RGCN"):
+            return embedding, self.w_relation
+        elif(self.model_name == "EGCN"):
+            return embedding, weight
 
     def regularization_loss(self, embedding, weight):
-        # if(self.model_name == "EGCN"):
-        #     self.w_relation = self.rgcn.rgcn_layer.get_w()
-        return torch.mean(embedding.pow(2)) + torch.mean(weight.pow(2))
+        if(self.model_name == "RGCN"):
+            return torch.mean(embedding.pow(2)) + torch.mean(self.w_relation.pow(2))
+        if(self.model_name == "EGCN"):
+            return torch.mean(embedding.pow(2)) + torch.mean(weight.pow(2))
 
     def get_loss(self, g, triplets, labels, weight, incidence_in, incidence_out):
-        # triplets is a list of data samples (positive and negative)
-        # each row in the triplets is a 3-tuple of (source, relation, destination)
         embedding, weight = self.forward(g, weight, incidence_in, incidence_out)
 
         score = self.calc_score(embedding, weight, triplets)
-        score = score.clamp(min=-10, max=10)
+        # score = score.clamp(min=-10, max=10)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
         reg_loss = self.regularization_loss(embedding, weight)
         return predict_loss + self.reg_param * reg_loss, weight
@@ -130,16 +132,11 @@ def main(args):
     test_data = data.test
     num_rels = data.num_rels
     all_data = np.concatenate((train_data, valid_data, test_data), axis=0)
-    # check cuda
-    # use_cuda = args.gpu >= 0 and torch.cuda.is_available()
-    # if use_cuda:
-    #     torch.cuda.set_device(args.gpu)
 
-    monitor = ShurikenMonitor()
+    if(use_shuriken):
+        monitor = ShurikenMonitor()
 
     use_cuda = torch.cuda.is_available()
-
-
 
     # create model
     model = LinkPredict(num_nodes,
@@ -161,10 +158,8 @@ def main(args):
     # all_data = torch.LongTensor(all_data.astype(set))
 
 
-
-
     # build test graph
-    test_graph, test_rel, test_norm, incidence_in, incidence_out = utils.build_test_graph(num_nodes, num_rels, train_data)
+    test_graph, test_rel, test_norm, incidence_in_test, incidence_out_test = utils.build_test_graph(num_nodes, num_rels, train_data)
     test_deg = test_graph.in_degrees(
                 range(test_graph.number_of_nodes())).float().view(-1,1)
     test_node_id = torch.arange(0, num_nodes, dtype=torch.long).view(-1, 1)
@@ -176,9 +171,6 @@ def main(args):
     if use_cuda:
         model.cuda()
 
-    # print("1")
-    # print(torch.cuda.memory_allocated(device=None))
-
     # build adj list and calculate degrees for sampling
     adj_list, degrees = utils.get_adj_and_degrees(num_nodes, train_data)
 
@@ -189,13 +181,12 @@ def main(args):
     forward_time = []
     backward_time = []
 
-    # training loop
     print("start training...")
 
     epoch = 0
     best_mrr = 0
 
-    weight = torch.rand(num_rels * 2, args.n_hidden).cuda()
+    weight = torch.randn(num_rels * 2, args.n_hidden).cuda()
 
     while True:
         model.train()
@@ -206,7 +197,6 @@ def main(args):
             utils.generate_sampled_graph_and_labels(
                 train_data, args.graph_batch_size, args.graph_split_size,
                 num_rels, adj_list, degrees, args.negative_sample)
-        print("Done edge sampling")
 
         # set node/edge feature
         node_id = torch.from_numpy(node_id).view(-1, 1)
@@ -238,9 +228,6 @@ def main(args):
 
         optimizer.zero_grad()
 
-        # print("2")
-        # print(torch.cuda.memory_allocated(device=None))
-
         # validation
         if epoch % args.evaluate_every == 0:
             # perform validation on CPU because full graph is too large
@@ -249,10 +236,10 @@ def main(args):
             model.eval()
             print("start eval")
             # mrr_f = utils.evaluate_filtered(test_graph, model, valid_data, num_nodes, all_data, hits=[1, 3, 10])
-            mrr = utils.evaluate(test_graph, model, valid_data, num_nodes,
-                                 hits=[1, 3, 10], eval_bz=args.eval_batch_size)
-            
-            monitor.send_info(epoch, {"mrr": mrr})            
+            mrr = utils.evaluate(test_graph, model, valid_data, num_nodes, weight, incidence_in_test, incidence_out_test, hits=[1, 3, 10], eval_bz=args.eval_batch_size)
+
+            if(use_shuriken):
+                monitor.send_info(epoch, {"mrr": mrr})            
 
             # save best model
             if mrr < best_mrr:
@@ -260,19 +247,18 @@ def main(args):
                     break
             else:
                 best_mrr = mrr
-
                 try:
                     os.makedirs(args.model)
                 except FileExistsError:
                     pass
                 torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
                         args.model + "/" + model_state_file)
+                # if epoch >= args.n_epochs:
+                #     break
             if use_cuda:
                 model.cuda()
 
 
-
-    print("training done")
     print("Mean forward time: {:4f}s".format(np.mean(forward_time)))
     print("Mean Backward time: {:4f}s".format(np.mean(backward_time)))
 
@@ -284,12 +270,14 @@ def main(args):
     model.eval()
     model.load_state_dict(checkpoint['state_dict'])
     print("Using best epoch: {}".format(checkpoint['epoch']))
-    test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, hits=[1, 3, 10],
-                   eval_bz=args.eval_batch_size)
-    monitor.send_info(epoch, {"test mrr": test_mrr})  
+    # test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, hits=[1, 3, 10],
+    #                eval_bz=args.eval_batch_size)
+    test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, weight, incidence_in_test, incidence_out_test, hits=[1, 3, 10], eval_bz=args.eval_batch_size)
+
+    if(use_shuriken):
+        monitor.send_info(epoch, {"test mrr": test_mrr})  
 
 if __name__ == '__main__':
-
 
     parser = argparse.ArgumentParser(description='RGCN')
     parser.add_argument("--dropout", type=float, default=0.2,
@@ -308,7 +296,7 @@ if __name__ == '__main__':
             help="number of minimum training epochs")
     parser.add_argument("-d", "--dataset", type=str, required=True,
             help="dataset to use")
-    parser.add_argument("--eval-batch-size", type=int, default=100,
+    parser.add_argument("--eval-batch-size", type=int, default=10,
             help="batch size when evaluating")
     parser.add_argument("--regularization", type=float, default=0.01,
             help="regularization weight")
@@ -320,7 +308,7 @@ if __name__ == '__main__':
             help="portion of edges used as positive sample")
     parser.add_argument("--negative-sample", type=int, default=10,
             help="number of negative samples per positive sample")
-    parser.add_argument("--evaluate-every", type=int, default=500,
+    parser.add_argument("--evaluate-every", type=int, default=100,
             help="perform evaluation every n epochs")
     parser.add_argument("--rgcn")
     parser.add_argument("--model", type=str,
@@ -329,16 +317,16 @@ if __name__ == '__main__':
             help="skip connection in EGCN or not")
     args = parser.parse_args()
     
+    if(use_shuriken):
+        d_params = vars(args)
 
+        # get the hyperparameters from the services
+        # returns a dict of hyperparams
+        hparams = get_hparams()
+        if 'n_iterations' in hparams:
+            hparams['number_of_steps'] = hparams['n_iterations'] * 100
+        d_params.update(hparams)
 
-    d_params = vars(args)
-
-    # get the hyperparameters from the services
-    # returns a dict of hyperparams
-    hparams = get_hparams()
-    if 'n_iterations' in hparams:
-        hparams['number_of_steps'] = hparams['n_iterations'] * 100
-    d_params.update(hparams)
-
+    print(args.skip_connection)
     main(args)
 
