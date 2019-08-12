@@ -24,7 +24,9 @@ from model import BaseRGCN
 import utils
 import os
 import warnings 
-
+from os import listdir
+from os.path import isfile, join
+import os.path
 
 use_shuriken = True
 
@@ -123,6 +125,73 @@ class LinkPredict(nn.Module):
         return predict_loss + self.reg_param * reg_loss, weight
 
 
+def encode_hype(args):
+    encoded = ""
+    encoded += str(args.lr) + "_"
+    encoded += str(args.dropout) + "_" 
+    encoded += str(args.regularization) + "_"
+    return encoded
+
+def save_model(args, model, itr, opt):  
+    print("Saving the model")
+    directory = "models/" + args.model + "/" + args.dataset + "/"
+    directory_opt = "optimizers/" + args.model + "/" + args.dataset + "/"
+    
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    if not os.path.exists(directory_opt):
+        os.makedirs(directory_opt)
+    torch.save(model, directory + encode_hype(args) + str(itr) + ".chkpnt")
+    torch.save(opt, directory_opt + encode_hype(args) + ".chkpnt")
+
+def save_best_model(args, model, mrr):  
+    print("Saving the best model")
+    directory = "models/" + args.model + "/" + args.dataset + "/"
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    mrr_file = open(directory + encode_hype(args) + "best_mrr.txt", 'w')
+    mrr_file.write(str(mrr) + "\n")
+    torch.save(model, directory + encode_hype(args) + "best_model.chkpnt")
+
+
+def load_best_model(args, model):
+    print("Loading the best model")
+    directory = "models/" + args.model + "/" + args.dataset + "/"
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    f = encode_hype(args) + "best_model.chkpnt"
+    if(isfile(join(directory, f))):
+        model = torch.load(directory + f)
+        mrr_file = open(directory + encode_hype(args) + "best_mrr.txt", 'r')
+        best_mrr = float(mrr_file.read().strip())
+    else:
+        best_mrr = 0
+    print("Best model loaded with mrr: " + str(best_mrr))
+    return model, best_mrr
+
+def load_model(args, model):
+    print("Loading the model")
+    directory = "models/" + args.model + "/" + args.dataset + "/"
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    onlyfiles = [f for f in listdir(directory) if isfile(join(directory, f))]
+    hype_encoding = encode_hype(args)
+    related_files = {}
+    for f in onlyfiles:
+        if f.startswith(hype_encoding):
+            itr = f.replace('.chkpnt','')
+            itr = itr.replace(hype_encoding,'')
+            if itr.isdigit():
+                related_files[int(itr)] = f
+    if(len(related_files) > 0):
+        key = max(related_files)
+        model = torch.load(directory + related_files[key])
+    else:
+        key = 0
+    print("Model loaded from itr: " + str(key))
+    return model, key
+
+
 def main(args):
     # load graph data
     data = load_data(args.dataset)
@@ -150,7 +219,16 @@ def main(args):
                         reg_param=args.regularization,
                         skip_connection=args.skip_connection)
 
+    new_model, res = load_model(args, model)
+    print(res)
+    epoch = 0
+    # best_mrr = 0
 
+    if(res != 0):
+        model = new_model
+        epoch = res
+    print(epoch)
+    best_model, best_mrr = load_best_model(args, model)
 
     # validation and testing triplets
     valid_data = torch.LongTensor(valid_data)
@@ -177,14 +255,13 @@ def main(args):
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    model_state_file = 'model_state_' + str(args.dropout) + '_' + str(args.lr) + '_' + str(args.regularization) + '.pth'
+    # model_state_file = 'model_state_' + str(args.dropout) + '_' + str(args.lr) + '_' + str(args.regularization) + '.pth'
     forward_time = []
     backward_time = []
 
     print("start training...")
 
-    epoch = 0
-    best_mrr = 0
+    
 
     weight = torch.randn(num_rels * 2, args.n_hidden).cuda()
 
@@ -228,8 +305,13 @@ def main(args):
 
         optimizer.zero_grad()
 
+
+        # save model
+        # if epoch % 1 == 0:
+            # save_model(args, model, epoch, optimizer)
         # validation
         if epoch % args.evaluate_every == 0:
+            save_model(args, model, epoch, optimizer)
             # perform validation on CPU because full graph is too large
             if use_cuda:
                 model.cpu()
@@ -247,14 +329,16 @@ def main(args):
                     break
             else:
                 best_mrr = mrr
+                best_model = model
                 try:
                     os.makedirs(args.model)
                 except FileExistsError:
                     pass
-                torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
-                        args.model + "/" + model_state_file)
+                # torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
+                #         args.model + "/" + model_state_file)
                 # if epoch >= args.n_epochs:
                 #     break
+                save_best_model(args, model, best_mrr)
             if use_cuda:
                 model.cuda()
 
@@ -264,15 +348,17 @@ def main(args):
 
     print("\nstart testing:")
     # use best model checkpoint
-    checkpoint = torch.load(args.model + "/" + model_state_file)
+    # checkpoint = torch.load(args.model + "/" + model_state_file)
     if use_cuda:
-        model.cpu() # test on CPU
-    model.eval()
-    model.load_state_dict(checkpoint['state_dict'])
-    print("Using best epoch: {}".format(checkpoint['epoch']))
+        best_model.cpu() # test on CPU
+    best_model.eval()
+
+    # model.eval()
+    # model.load_state_dict(checkpoint['state_dict'])
+    # print("Using best epoch: {}".format(checkpoint['epoch']))
     # test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, hits=[1, 3, 10],
     #                eval_bz=args.eval_batch_size)
-    test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, weight, incidence_in_test, incidence_out_test, hits=[1, 3, 10], eval_bz=args.eval_batch_size)
+    test_mrr = utils.evaluate(test_graph, best_model, test_data, num_nodes, weight, incidence_in_test, incidence_out_test, hits=[1, 3, 10], eval_bz=args.eval_batch_size)
 
     if(use_shuriken):
         monitor.send_info(epoch, {"test mrr": test_mrr})  
@@ -319,7 +405,6 @@ if __name__ == '__main__':
     
     if(use_shuriken):
         d_params = vars(args)
-
         # get the hyperparameters from the services
         # returns a dict of hyperparams
         hparams = get_hparams()
@@ -327,6 +412,6 @@ if __name__ == '__main__':
             hparams['number_of_steps'] = hparams['n_iterations'] * 100
         d_params.update(hparams)
 
-    print(args.skip_connection)
+
     main(args)
 

@@ -1,1 +1,10 @@
 *.pth
+models/
+optimizers/
+._.DS_Store
+.dockerignore
+borgy
+Dockerfile
+saga
+shk.json
+toy-example/
