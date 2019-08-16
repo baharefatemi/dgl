@@ -28,6 +28,7 @@ from os import listdir
 from os.path import isfile, join
 import os.path
 
+# hyperparameter tuning library of Element AI
 use_shuriken = True
 
 if(use_shuriken):
@@ -38,7 +39,6 @@ class EmbeddingLayer(nn.Module):
     def __init__(self, num_nodes, h_dim):
         super(EmbeddingLayer, self).__init__()
         self.embedding = torch.nn.Embedding(num_nodes, h_dim)
-        # .cuda()
 
     def forward(self, g, weight, incidence_in, incidence_out):
         node_id = g.ndata['id'].squeeze()
@@ -101,7 +101,6 @@ class LinkPredict(nn.Module):
         elif(model_name == "EGCN"):
             self.rgcn = RGCN1(in_dim, h_dim, h_dim, num_rels * 2, num_bases,
                              num_hidden_layers, dropout, use_cuda, skip_connection, rel_activation)
-            # self.w_relation = self.rgcn.rgcn_layer.get_w()
 
         self.reg_param = reg_param
 
@@ -138,9 +137,7 @@ class LinkPredict(nn.Module):
 
     def get_loss(self, g, triplets, labels, weight, incidence_in, incidence_out):
         embedding, weight = self.forward(g, weight, incidence_in, incidence_out)
-
         score = self.calc_score(embedding, weight, triplets)
-        # score = score.clamp(min=-10, max=10)
         predict_loss = F.binary_cross_entropy_with_logits(score, labels)
         reg_loss = self.regularization_loss(embedding, weight)
         return predict_loss + self.reg_param * reg_loss, weight
@@ -151,9 +148,10 @@ def encode_hype(args):
     encoded += str(args.lr) + "_"
     encoded += str(args.dropout) + "_" 
     encoded += str(args.regularization) + "_"
-
     return encoded
 
+# This function is to save the model and optimizer. 
+# This helps running jobs restartable
 def save_model(args, model, itr, opt):  
     print("Saving the model")
     directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
@@ -166,6 +164,7 @@ def save_model(args, model, itr, opt):
     torch.save(model, directory + encode_hype(args) + str(itr) + ".chkpnt")
     torch.save(opt, directory_opt + encode_hype(args) + ".chkpnt")
 
+# Save the best model and its mrr 
 def save_best_model(args, model, mrr):  
     print("Saving the best model")
     directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
@@ -175,7 +174,7 @@ def save_best_model(args, model, mrr):
     mrr_file.write(str(mrr) + "\n")
     torch.save(model, directory + encode_hype(args) + "best_model.chkpnt")
 
-
+# In case a job is restarted, load the best model and its mrr
 def load_best_model(args, model):
     print("Loading the best model")
     directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
@@ -191,6 +190,8 @@ def load_best_model(args, model):
     print("Best model loaded with mrr: " + str(best_mrr))
     return model, best_mrr
 
+# In case a job is retsrated, load the last model saved
+# Load the optimizer so we can start from where it restarted
 def load_model(args, model):
     print("Loading the model")
     directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
@@ -242,9 +243,9 @@ def main(args):
                         skip_connection=args.skip_connection,
                         rel_activation=args.rel_activation)
 
+    # check if there is a model with the same hyperparameters saved
     new_model, res = load_model(args, model)
     epoch = 0
-    # best_mrr = 0
 
     if(res != 0):
         model = new_model
@@ -417,6 +418,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     
+    # If using the hyperparameter tuning tool of Element AI
     if(use_shuriken):
         d_params = vars(args)
         # get the hyperparameters from the services
