@@ -4,11 +4,12 @@ import dgl.function as fn
 
 class RGCNLayer(nn.Module):
     def __init__(self, in_feat, out_feat, bias=None, activation=None,
-                 self_loop=False, dropout=0.0):
+                 self_loop=False, dropout=0.0, skip_connection=False, rel_activation=None):
         super(RGCNLayer, self).__init__()
         self.bias = bias
         self.activation = activation
         self.self_loop = self_loop
+        self.rel_activation = rel_activation
 
         if self.bias == True:
             self.bias = nn.Parameter(torch.Tensor(out_feat))
@@ -51,65 +52,6 @@ class RGCNLayer(nn.Module):
         g.ndata['h'] = node_repr
 
         return weight_
-
-class RGCNLayer2(nn.Module):
-    def __init__(self, in_feat, out_feat, bias=None, activation=None,
-                 self_loop=False, dropout=0.0, skip_connection=False):
-        super(RGCNLayer2, self).__init__()
-        self.bias = bias
-        self.activation = activation
-        self.self_loop = self_loop
-        self.skip_connection = skip_connection
-
-        if self.bias == True:
-            self.bias = nn.Parameter(torch.Tensor(out_feat))
-            nn.init.xavier_uniform_(self.bias,
-                                    gain=nn.init.calculate_gain('relu'))
-
-        # weight for self loop
-        if self.self_loop:
-            self.loop_weight = nn.Parameter(torch.Tensor(in_feat, out_feat))
-            nn.init.xavier_uniform_(self.loop_weight,
-                                    gain=nn.init.calculate_gain('relu'))
-
-        if dropout:
-            self.dropout = nn.Dropout(dropout)
-        else:
-            self.dropout = None
-
-    # define how propagation is done in subclass
-    def propagate(self, g, weight, incidence_in, incidence_out):
-        raise NotImplementedError
-
-    def forward(self, g, weight, incidence_in, incidence_out):
-        if self.self_loop:
-            loop_message = torch.mm(g.ndata['h'], self.loop_weight)
-            if self.dropout is not None:
-                loop_message = self.dropout(loop_message)
-
-        # store previous value
-        if self.skip_connection:
-            prev_h = g.ndata['h']
-
-        # In the propagate function the data in 'h' will be updated.
-        weight_ = self.propagate(g, weight, incidence_in, incidence_out)
-
-
-        # apply bias and activation
-        node_repr = g.ndata['h']
-        if self.bias:
-            node_repr = node_repr + self.bias
-        if self.self_loop:
-            node_repr = node_repr + loop_message
-        if self.activation:
-            node_repr = self.activation(node_repr)
-        if self.skip_connection:
-            node_repr = node_repr + prev_h
-
-        g.ndata['h'] = node_repr
-        return weight_
-
-
 
 
 class RGCNBasisLayer(RGCNLayer):
@@ -198,10 +140,10 @@ class RGCNBlockLayer(RGCNLayer):
 
 class RGCNBlockLayer2(RGCNLayer):
     def __init__(self, in_feat, out_feat, num_rels, bias=None,
-                 activation=None, self_loop=False, dropout=0.0, skip_connection=False):
+                 activation=None, self_loop=False, dropout=0.0, skip_connection=False, rel_activation=None):
         super(RGCNBlockLayer2, self).__init__(in_feat, out_feat, bias,
                                              activation, self_loop=self_loop,
-                                             dropout=dropout)
+                                             dropout=dropout, rel_activation=rel_activation)
         # , skip_connection=skip_connection)
         # self.skip_connection = skip_connection
         self.num_rels = num_rels
@@ -210,15 +152,6 @@ class RGCNBlockLayer2(RGCNLayer):
 
         self.weight = nn.Parameter(torch.Tensor(self.num_rels, self.out_feat))
         nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
-
-        # print("init weight:")
-        # print(len(torch.nonzero(self.weight))/self.weight.numel())
-
-
-        # assuming in_feat and out_feat are both divisible by num_bases
-        # self.weight = torch.rand(self.num_rels, self.out_feat).cuda()
-        # nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
-        # self.weight.requires_grad = False
 
         # self.W1 = nn.Linear(out_feat, out_feat, bias=True)
         self.W2 = nn.Linear(out_feat, out_feat, bias=True)
@@ -229,21 +162,8 @@ class RGCNBlockLayer2(RGCNLayer):
 
     def msg_func(self, edges):
 
-
-        # print("msg_function:")
-        # print(self.weight)
-        # print("weight after relation aggregating:")
-        # print(self.weight)
-
-        # print("weight:")
-        # print(len(torch.nonzero(self.weight))/self.weight.numel())
-
-        weight1 = self.weight.index_select(0, edges.data['type'])
-        # .view(-1, self.out_feat)
-        
+        weight1 = self.weight.index_select(0, edges.data['type'])        
         node = edges.src['h']
-        # node1 = edges.dst['h']
-
         msg = torch.sigmoid(self.W2(weight1)) * self.W3(node)
 
         return {'msg': msg}
@@ -259,18 +179,13 @@ class RGCNBlockLayer2(RGCNLayer):
         incidence_in = incidence_in / n_0
         incidence_out = incidence_out / n_1
 
-        # print("weight before relation aggregation:")
-        # print(weight)
-        # print(len(torch.nonzero(self.weight))/self.weight.numel())
-        # elu = torch.nn.ELU()
-        
-        self.weight =  nn.Parameter(torch.tanh(self.W4(weight) + self.W5(torch.mm(incidence_in, g.ndata['h'])) + self.W6(torch.mm(incidence_out, g.ndata['h']))))
-        # self.weight = nn.Parameter(weight)
+        if(self.rel_activation):
+            self.weight =  nn.Parameter(self.rel_activation(self.W4(weight) + self.W5(torch.mm(incidence_in, g.ndata['h'])) + self.W6(torch.mm(incidence_out, g.ndata['h']))))
+        else:
+            self.weight =  nn.Parameter(self.W4(weight) + self.W5(torch.mm(incidence_in, g.ndata['h'])) + self.W6(torch.mm(incidence_out, g.ndata['h'])))
 
         g.update_all(self.msg_func, fn.sum(msg='msg', out='h'), self.apply_func)
-        
-        # print("weight after relation aggregation:")
-        # print(self.weight)
+
 
         return self.weight
 

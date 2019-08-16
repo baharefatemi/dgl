@@ -56,19 +56,40 @@ class RGCN0(BaseRGCN):
                          activation=act, self_loop=True, dropout=self.dropout)
 
 class RGCN1(BaseRGCN):
+    def __init__(self, num_nodes, h_dim, out_dim, num_rels, num_bases=-1,
+                 num_hidden_layers=1, dropout=0, use_cuda=False, skip_connection=False, rel_activation=1):
+        super(RGCN1, self).__init__(num_nodes, h_dim, out_dim, num_rels, num_bases,
+                 num_hidden_layers, dropout, use_cuda, skip_connection, rel_activation)
+
     def build_input_layer(self):
         return EmbeddingLayer(self.num_nodes, self.h_dim)
 
     def build_hidden_layer(self, idx):
         act = F.relu if idx < self.num_hidden_layers - 1 else None
-        print(act)
+
+        if(idx < self.num_hidden_layers - 1):
+            if(self.rel_activation == 0):
+                rel_act = nn.Tanh()
+            elif(self.rel_activation == 1):
+                rel_act = nn.ELU()
+            elif(self.rel_activation == 2):
+                rel_act = nn.CELU()
+            elif(self.rel_activation == 3):
+                rel_act= nn.SELU()
+            elif(self.rel_activation == 4):
+                rel_act = nn.Hardtanh()
+            elif(self.rel_activation == 5):
+                rel_act = nn.ReLU()
+        else:
+            rel_act = None
+
         return RGCNLayer2(self.h_dim, self.h_dim, self.num_rels,
-                         activation=act, self_loop=True, dropout=self.dropout)
+                         activation=act, self_loop=True, dropout=self.dropout, rel_activation=rel_act)
 
 
 class LinkPredict(nn.Module):
     def __init__(self, in_dim, h_dim, num_rels, model_name, num_bases=-1,
-                 num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0, skip_connection=False):
+                 num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0, skip_connection=False, rel_activation=1):
         super(LinkPredict, self).__init__()
         self.model_name = model_name
         if(model_name == "RGCN"):
@@ -79,7 +100,7 @@ class LinkPredict(nn.Module):
 
         elif(model_name == "EGCN"):
             self.rgcn = RGCN1(in_dim, h_dim, h_dim, num_rels * 2, num_bases,
-                             num_hidden_layers, dropout, use_cuda, skip_connection)
+                             num_hidden_layers, dropout, use_cuda, skip_connection, rel_activation)
             # self.w_relation = self.rgcn.rgcn_layer.get_w()
 
         self.reg_param = reg_param
@@ -130,12 +151,13 @@ def encode_hype(args):
     encoded += str(args.lr) + "_"
     encoded += str(args.dropout) + "_" 
     encoded += str(args.regularization) + "_"
+
     return encoded
 
 def save_model(args, model, itr, opt):  
     print("Saving the model")
-    directory = "models/" + args.model + "/" + args.dataset + "/"
-    directory_opt = "optimizers/" + args.model + "/" + args.dataset + "/"
+    directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
+    directory_opt = "optimizers/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
     
     if not os.path.exists(directory):
         os.makedirs(directory)
@@ -146,7 +168,7 @@ def save_model(args, model, itr, opt):
 
 def save_best_model(args, model, mrr):  
     print("Saving the best model")
-    directory = "models/" + args.model + "/" + args.dataset + "/"
+    directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
     if not os.path.exists(directory):
         os.makedirs(directory)
     mrr_file = open(directory + encode_hype(args) + "best_mrr.txt", 'w')
@@ -156,7 +178,7 @@ def save_best_model(args, model, mrr):
 
 def load_best_model(args, model):
     print("Loading the best model")
-    directory = "models/" + args.model + "/" + args.dataset + "/"
+    directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
     if not os.path.exists(directory):
         os.makedirs(directory)
     f = encode_hype(args) + "best_model.chkpnt"
@@ -171,7 +193,7 @@ def load_best_model(args, model):
 
 def load_model(args, model):
     print("Loading the model")
-    directory = "models/" + args.model + "/" + args.dataset + "/"
+    directory = "models/" + args.model + "/" + args.dataset + "/" + str(args.rel_activation) + "/"
     if not os.path.exists(directory):
         os.makedirs(directory)
     onlyfiles = [f for f in listdir(directory) if isfile(join(directory, f))]
@@ -217,17 +239,17 @@ def main(args):
                         dropout=args.dropout,
                         use_cuda=use_cuda,
                         reg_param=args.regularization,
-                        skip_connection=args.skip_connection)
+                        skip_connection=args.skip_connection,
+                        rel_activation=args.rel_activation)
 
     new_model, res = load_model(args, model)
-    print(res)
     epoch = 0
     # best_mrr = 0
 
     if(res != 0):
         model = new_model
         epoch = res
-    print(epoch)
+
     best_model, best_mrr = load_best_model(args, model)
 
     # validation and testing triplets
@@ -305,10 +327,6 @@ def main(args):
 
         optimizer.zero_grad()
 
-
-        # save model
-        # if epoch % 1 == 0:
-            # save_model(args, model, epoch, optimizer)
         # validation
         if epoch % args.evaluate_every == 0:
             save_model(args, model, epoch, optimizer)
@@ -317,7 +335,8 @@ def main(args):
                 model.cpu()
             model.eval()
             print("start eval")
-            # mrr_f = utils.evaluate_filtered(test_graph, model, valid_data, num_nodes, all_data, hits=[1, 3, 10])
+
+            # mrr_f = utils.evaluate_filtered(test_graph, model, valid_data, all_data, num_nodes, weight, incidence_in_test, incidence_out_test, hits=[1, 3, 10], eval_bz=args.eval_batch_size)
             mrr = utils.evaluate(test_graph, model, valid_data, num_nodes, weight, incidence_in_test, incidence_out_test, hits=[1, 3, 10], eval_bz=args.eval_batch_size)
 
             if(use_shuriken):
@@ -334,10 +353,7 @@ def main(args):
                     os.makedirs(args.model)
                 except FileExistsError:
                     pass
-                # torch.save({'state_dict': model.state_dict(), 'epoch': epoch},
-                #         args.model + "/" + model_state_file)
-                # if epoch >= args.n_epochs:
-                #     break
+
                 save_best_model(args, model, best_mrr)
             if use_cuda:
                 model.cuda()
@@ -353,11 +369,6 @@ def main(args):
         best_model.cpu() # test on CPU
     best_model.eval()
 
-    # model.eval()
-    # model.load_state_dict(checkpoint['state_dict'])
-    # print("Using best epoch: {}".format(checkpoint['epoch']))
-    # test_mrr = utils.evaluate(test_graph, model, test_data, num_nodes, hits=[1, 3, 10],
-    #                eval_bz=args.eval_batch_size)
     test_mrr = utils.evaluate(test_graph, best_model, test_data, num_nodes, weight, incidence_in_test, incidence_out_test, hits=[1, 3, 10], eval_bz=args.eval_batch_size)
 
     if(use_shuriken):
@@ -401,6 +412,9 @@ if __name__ == '__main__':
             help="which model do you want to train on?")
     parser.add_argument("--skip-connection", type=bool, default=False,
             help="skip connection in EGCN or not")
+    parser.add_argument("--rel-activation", type=int, default=1,
+            help="type of activation function for relation aggregation")
+
     args = parser.parse_args()
     
     if(use_shuriken):

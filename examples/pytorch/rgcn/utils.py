@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import dgl
 import math
+from dgl.contrib.data import load_data
 
 #######################################################################
 #
@@ -233,6 +234,70 @@ def evaluate(test_graph, model, test_triplets, num_entity, weight, incidence_in_
             avg_count = torch.mean((ranks <= hit).float())
             print("Hits (raw) @ {}: {:.6f}".format(hit, avg_count.item()))
     return mrr.item()
+
+
+
+def evaluate_filtered(test_graph, model, test_triplets, all_data, num_entity, weight, incidence_in_test, incidence_out_test, hits=[], eval_bz=10):
+
+    with torch.no_grad():
+        embedding, w = model.evaluate(test_graph, weight, incidence_in_test, incidence_out_test)
+
+        s = test_triplets[:, 0]
+        r = test_triplets[:, 1]
+        o = test_triplets[:, 2]
+
+        # perturb subject
+        ranks_s = perturb_and_get_rank_filtered(embedding, w, o, r, s, num_entity, len(test_triplets), all_data, eval_bz)
+        # perturb object
+        ranks_o = perturb_and_get_rank_filtered(embedding, w, s, r, o, num_entity, len(test_triplets), all_data, eval_bz)
+
+        ranks = torch.cat([ranks_s, ranks_o])
+        ranks += 1 # change to 1-indexed
+
+        mrr = torch.mean(1.0 / ranks.float())
+        print("MRR (raw): {:.6f}".format(mrr.item()))
+
+        for hit in hits:
+            avg_count = torch.mean((ranks <= hit).float())
+            print("Hits (raw) @ {}: {:.6f}".format(hit, avg_count.item()))
+    return mrr.item()
+
+
+def perturb_and_get_rank_filtered(embedding, w, a, r, b, num_entity, num_triples, all_data, batch_size):
+    """ Perturb one element in the triplets
+    """
+    # n_batch = (num_entity + batch_size - 1) // batch_size
+    # n_batch = math.floor(num_triples // batch_size)
+
+    ranks = []
+    for idx in range(num_triples):
+        a_r = torch.tensor([a[idx], r[idx]]).repeat(num_entity, 1)
+        b = torch.arange(num_entity).view(-1, 1)
+        
+        triples = torch.cat((a_r, b), dim=1).numpy()
+        to_test_triples = np.setdiff1d(triples, all_data)
+
+        print(len(triples))
+        emb_ar = embedding[batch_a] * w[batch_r]
+        emb_ar = emb_ar.transpose(0, 1).unsqueeze(2) # size: D x E x 1
+
+        # I should change emb_c
+
+        emb_c = embedding.transpose(0, 1).unsqueeze(1) # size: D x 1 x V
+        # out-prod and reduce sum
+        
+        emb_ar = emb_ar.cuda()
+        emb_c = emb_c.cuda()
+
+        # print(idx)
+
+        out_prod = torch.bmm(emb_ar, emb_c) # size D x E x V
+        score = torch.sum(out_prod, dim=0) # size E x V
+        score = torch.sigmoid(score).cpu()
+        target = b[batch_start: batch_end]
+        ranks.append(sort_and_rank(score, target))
+    return torch.cat(ranks)
+
 
 
 # def perturb_and_get_rank_filtered(embedding, w, s, r, o, num_entity, all_data):
