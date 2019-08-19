@@ -57,9 +57,9 @@ class RGCN0(BaseRGCN):
 
 class RGCN1(BaseRGCN):
     def __init__(self, num_nodes, h_dim, out_dim, num_rels, num_bases=-1,
-                 num_hidden_layers=1, dropout=0, use_cuda=False, skip_connection=False, rel_activation=1):
+                 num_hidden_layers=1, dropout=0, use_cuda=False, skip_connection=False, rel_activation=1, rel_dropout=0):
         super(RGCN1, self).__init__(num_nodes, h_dim, out_dim, num_rels, num_bases,
-                 num_hidden_layers, dropout, use_cuda, skip_connection, rel_activation)
+                 num_hidden_layers, dropout, use_cuda, skip_connection, rel_activation, rel_dropout)
 
     def build_input_layer(self):
         return EmbeddingLayer(self.num_nodes, self.h_dim)
@@ -80,16 +80,18 @@ class RGCN1(BaseRGCN):
                 rel_act = nn.Hardtanh()
             elif(self.rel_activation == 5):
                 rel_act = nn.ReLU()
+            else:
+                rel_act = None
         else:
             rel_act = None
 
         return RGCNLayer2(self.h_dim, self.h_dim, self.num_rels,
-                         activation=act, self_loop=True, dropout=self.dropout, rel_activation=rel_act)
+                         activation=act, self_loop=True, dropout=self.dropout, rel_activation=rel_act, rel_dropout=self.rel_dropout)
 
 
 class LinkPredict(nn.Module):
     def __init__(self, in_dim, h_dim, num_rels, model_name, num_bases=-1,
-                 num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0, skip_connection=False, rel_activation=1):
+                 num_hidden_layers=1, dropout=0, use_cuda=False, reg_param=0, skip_connection=False, rel_activation=1, rel_dropout=0):
         super(LinkPredict, self).__init__()
         self.model_name = model_name
         if(model_name == "RGCN"):
@@ -100,7 +102,7 @@ class LinkPredict(nn.Module):
 
         elif(model_name == "EGCN"):
             self.rgcn = RGCN1(in_dim, h_dim, h_dim, num_rels * 2, num_bases,
-                             num_hidden_layers, dropout, use_cuda, skip_connection, rel_activation)
+                             num_hidden_layers, dropout, use_cuda, skip_connection, rel_activation, rel_dropout)
 
         self.reg_param = reg_param
 
@@ -148,6 +150,7 @@ def encode_hype(args):
     encoded += str(args.lr) + "_"
     encoded += str(args.dropout) + "_" 
     encoded += str(args.regularization) + "_"
+    encoded += str(args.rel_dropout)
     return encoded
 
 # This function is to save the model and optimizer. 
@@ -241,7 +244,8 @@ def main(args):
                         use_cuda=use_cuda,
                         reg_param=args.regularization,
                         skip_connection=args.skip_connection,
-                        rel_activation=args.rel_activation)
+                        rel_activation=args.rel_activation,
+                        rel_dropout=args.rel_dropout)
 
     # check if there is a model with the same hyperparameters saved
     new_model, res = load_model(args, model)
@@ -415,6 +419,8 @@ if __name__ == '__main__':
             help="skip connection in EGCN or not")
     parser.add_argument("--rel-activation", type=int, default=1,
             help="type of activation function for relation aggregation")
+    parser.add_argument("--rel-dropout", type=float, default=0.2,
+            help="relation dropout probability")
 
     args = parser.parse_args()
     

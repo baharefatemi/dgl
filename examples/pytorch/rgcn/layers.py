@@ -4,7 +4,7 @@ import dgl.function as fn
 
 class RGCNLayer(nn.Module):
     def __init__(self, in_feat, out_feat, bias=None, activation=None,
-                 self_loop=False, dropout=0.0, skip_connection=False, rel_activation=None):
+                 self_loop=False, dropout=0.0, skip_connection=False, rel_activation=None, rel_dropout=0.0):
         super(RGCNLayer, self).__init__()
         self.bias = bias
         self.activation = activation
@@ -27,6 +27,11 @@ class RGCNLayer(nn.Module):
         else:
             self.dropout = None
 
+        if rel_dropout:
+            self.rel_dropout = nn.Dropout(rel_dropout)
+        else:
+            self.rel_dropout = None
+
     # define how propagation is done in subclass
     def propagate(self, g, weight, incidence_in, incidence_out):
         raise NotImplementedError
@@ -38,7 +43,6 @@ class RGCNLayer(nn.Module):
                 loop_message = self.dropout(loop_message)
 
         weight_ = self.propagate(g, weight, incidence_in, incidence_out)
-
 
         # apply bias and activation
         node_repr = g.ndata['h']
@@ -140,36 +144,49 @@ class RGCNBlockLayer(RGCNLayer):
 
 class RGCNBlockLayer2(RGCNLayer):
     def __init__(self, in_feat, out_feat, num_rels, bias=None,
-                 activation=None, self_loop=False, dropout=0.0, skip_connection=False, rel_activation=None):
+                 activation=None, self_loop=False, dropout=0.0, skip_connection=False, rel_activation=None, rel_dropout=0.0):
         super(RGCNBlockLayer2, self).__init__(in_feat, out_feat, bias,
                                              activation, self_loop=self_loop,
-                                             dropout=dropout, rel_activation=rel_activation)
-        # , skip_connection=skip_connection)
-        # self.skip_connection = skip_connection
+                                             dropout=dropout, rel_activation=rel_activation, rel_dropout=rel_dropout)
+
         self.num_rels = num_rels
         self.out_feat = out_feat
         
-
         self.weight = nn.Parameter(torch.Tensor(self.num_rels, self.out_feat))
         nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
 
-        # self.W1 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W2 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W3 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W4 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W5 = nn.Linear(out_feat, out_feat, bias=True)
-        self.W6 = nn.Linear(out_feat, out_feat, bias=True)
+        self.W1 = nn.Parameter(torch.Tensor(out_feat, out_feat))
+        nn.init.xavier_uniform_(self.W1, gain=nn.init.calculate_gain('relu'))
+
+        self.W2 = nn.Parameter(torch.Tensor(out_feat, out_feat))
+        nn.init.xavier_uniform_(self.W2, gain=nn.init.calculate_gain('relu'))
+
+        self.W3 = nn.Parameter(torch.Tensor(out_feat, out_feat))
+        nn.init.xavier_uniform_(self.W3, gain=nn.init.calculate_gain('relu'))
+
+        self.W4 = nn.Parameter(torch.Tensor(out_feat, out_feat))
+        nn.init.xavier_uniform_(self.W4, gain=nn.init.calculate_gain('relu'))
+
+        self.W5 = nn.Parameter(torch.Tensor(out_feat, out_feat))
+        nn.init.xavier_uniform_(self.W5, gain=nn.init.calculate_gain('relu'))
 
     def msg_func(self, edges):
 
         weight1 = self.weight.index_select(0, edges.data['type'])        
         node = edges.src['h']
-        msg = torch.sigmoid(self.W2(weight1)) * self.W3(node)
-
+        msg = torch.sigmoid(torch.mm(weight1, self.W1)) * torch.mm(node, self.W2)
         return {'msg': msg}
 
     def propagate(self, g, weight, incidence_in, incidence_out):
 
+        self.aggregate_relation(g, weight, incidence_in, incidence_out)
+        g.update_all(self.msg_func, fn.sum(msg='msg', out='h'), self.apply_func)
+        return self.weight
+
+    def apply_func(self, nodes):
+        return {'h': nodes.data['h'] * nodes.data['norm']}
+
+    def aggregate_relation(self, g, weight, incidence_in, incidence_out):
         n_0 = torch.sum(incidence_in.float(), dim = 1).view(-1, 1)
         n_1 = torch.sum(incidence_out.float(), dim = 1).view(-1, 1)
 
@@ -179,17 +196,13 @@ class RGCNBlockLayer2(RGCNLayer):
         incidence_in = incidence_in / n_0
         incidence_out = incidence_out / n_1
 
+        rel_loop_message = torch.mm(weight, self.W3)
+        if(self.rel_dropout):
+            rel_loop_message = self.rel_dropout(rel_loop_message)
+
         if(self.rel_activation):
-            self.weight =  nn.Parameter(self.rel_activation(self.W4(weight) + self.W5(torch.mm(incidence_in, g.ndata['h'])) + self.W6(torch.mm(incidence_out, g.ndata['h']))))
+            self.weight =  nn.Parameter(self.rel_activation(rel_loop_message + torch.mm(torch.mm(incidence_in, g.ndata['h']), self.W4) + torch.mm(torch.mm(incidence_out, g.ndata['h']), self.W5)))
         else:
-            self.weight =  nn.Parameter(self.W4(weight) + self.W5(torch.mm(incidence_in, g.ndata['h'])) + self.W6(torch.mm(incidence_out, g.ndata['h'])))
-
-        g.update_all(self.msg_func, fn.sum(msg='msg', out='h'), self.apply_func)
-
-
-        return self.weight
-
-    def apply_func(self, nodes):
-        return {'h': nodes.data['h'] * nodes.data['norm']}
+            self.weight =  nn.Parameter(rel_loop_message + torch.mm(torch.mm(incidence_in, g.ndata['h']), self.W4) + torch.mm(torch.mm(incidence_out, g.ndata['h']), self.W5))
 
 
